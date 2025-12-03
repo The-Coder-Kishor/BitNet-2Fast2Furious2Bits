@@ -1,142 +1,113 @@
-# BitNet AMD NPU Kernel Build Makefile
+##===- Makefile -----------------------------------------------------------===##
+# 
+# This file licensed under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 #
-# This Makefile builds the NPU kernels and generates the xclbin file
-# for AMD NPU acceleration.
-#
-# Prerequisites:
-#   - AMD Vitis/Vivado toolchain
-#   - MLIR-AIE tools
-#   - XRT (Xilinx Runtime)
+# Copyright (C) 2024, Advanced Micro Devices, Inc.
+# Modified for BitNet NPU acceleration.
+# 
+##===----------------------------------------------------------------------===##
 
-# Configuration
-MLIR_AIE_DIR ?= ../../mlir-aie
-AIE_KERNELS_DIR = $(MLIR_AIE_DIR)/aie_kernels/aie2
+srcdir := $(shell dirname $(realpath $(firstword $(MAKEFILE_LIST))))
 
-# Target device (npu or npu2)
-DEVICE ?= npu
+include ${srcdir}/makefile-common
 
-# Model configuration (bitnet_b1_58-3B by default)
+VPATH := ${srcdir}/../mlir-aie/aie_kernels/aie2:${srcdir}/kernels
+
+device = npu
+targetname = bitnet_mv
+trace_size = 8192
+
+CHESS ?= true
+
+# BitNet model configuration
 MODEL ?= bitnet_b1_58-3B
 LAYER ?= 0
-
-# Tile sizes
 M_TILE ?= 32
 K_TILE ?= 32
 N_CORES ?= 1
 
-# Build directories
-BUILD_DIR = build
-KERNEL_BUILD_DIR = $(BUILD_DIR)/kernels
+aie_py_src = bitnet_mv.py
 
-# Output files
-XCLBIN = $(BUILD_DIR)/bitnet_mv.xclbin
-KERNEL_OBJ = $(KERNEL_BUILD_DIR)/mv_ternary.o
+all: build/final.xclbin build/insts.txt
 
-# Compiler settings
-AIE_CC ?= xchesscc
-AIE_CC_FLAGS = -p me -P4 -c
+build/mv_ternary.o: kernels/mv_ternary.cc
+	mkdir -p ${@D}
+ifeq ($(device),npu)
+ifeq ($(CHESS), true)
+	cd ${@D} && xchesscc_wrapper ${CHESSCCWRAP2_FLAGS} -DDIM_M=${M_TILE} -DDIM_K=${K_TILE} -c $< -o ${@F}
+else 
+	cd ${@D} && ${PEANO_INSTALL_DIR}/bin/clang++ ${PEANOWRAP2_FLAGS} -DDIM_M=${M_TILE} -DDIM_K=${K_TILE} -c $< -o ${@F}
+endif
+else ifeq ($(device),npu2)
+	cd ${@D} && xchesscc_wrapper ${CHESSCCWRAP2P_FLAGS} -DDIM_M=${M_TILE} -DDIM_K=${K_TILE} -c $< -o ${@F}
+else
+	echo "Device type not supported"
+endif
 
-# MLIR tools
-MLIR_TRANSLATE ?= mlir-translate
-MLIR_OPT ?= mlir-opt
-AIE_GENERATE ?= aie-generate-cdo
+build/aie.mlir: ${srcdir}/${aie_py_src}
+	mkdir -p ${@D}
+	python3 $< --dev ${device} --model ${MODEL} --layer ${LAYER} \
+		--m-tile ${M_TILE} --k-tile ${K_TILE} --n-cores ${N_CORES} > $@
 
-.PHONY: all clean kernels xclbin mlir test help
+build/aie_trace.mlir: ${srcdir}/${aie_py_src}
+	mkdir -p ${@D}
+	python3 $< --dev ${device} --model ${MODEL} --layer ${LAYER} \
+		--m-tile ${M_TILE} --k-tile ${K_TILE} --n-cores ${N_CORES} > $@
 
-all: xclbin
+build/final.xclbin: build/aie.mlir build/mv_ternary.o
+	mkdir -p ${@D}
+ifeq ($(CHESS), true)
+	cd ${@D} && aiecc.py --aie-generate-cdo --no-compile-host --xclbin-name=${@F} \
+				--aie-generate-npu --npu-insts-name=insts.txt $(<:%=../%)
+else
+	cd ${@D} && aiecc.py --aie-generate-cdo --no-compile-host --xclbin-name=${@F} \
+		--no-xchesscc --no-xbridge \
+				--aie-generate-npu --npu-insts-name=insts.txt $(<:%=../%)
+endif
 
-help:
-	@echo "BitNet AMD NPU Kernel Build System"
-	@echo ""
-	@echo "Targets:"
-	@echo "  all      - Build everything (default)"
-	@echo "  kernels  - Compile AIE kernels"
-	@echo "  mlir     - Generate MLIR design"
-	@echo "  xclbin   - Generate xclbin package"
-	@echo "  test     - Run basic tests"
-	@echo "  clean    - Remove build artifacts"
-	@echo ""
-	@echo "Configuration variables:"
-	@echo "  DEVICE   - Target device: npu or npu2 (default: $(DEVICE))"
-	@echo "  MODEL    - BitNet model configuration (default: $(MODEL))"
-	@echo "  LAYER    - Layer index in model config (default: $(LAYER))"
-	@echo "  M_TILE   - M dimension tile size (default: $(M_TILE))"
-	@echo "  K_TILE   - K dimension tile size (default: $(K_TILE))"
-	@echo "  N_CORES  - Number of AIE cores (default: $(N_CORES))"
-	@echo ""
-	@echo "Examples:"
-	@echo "  make                          # Build with defaults"
-	@echo "  make DEVICE=npu2 MODEL=bitnet_b1_58-large"
-	@echo "  make clean all"
+build/final_trace.xclbin: build/aie_trace.mlir build/mv_ternary.o
+	mkdir -p ${@D}
+ifeq ($(CHESS), true)
+	cd ${@D} && aiecc.py --aie-generate-cdo --no-compile-host --xclbin-name=${@F} \
+				--aie-generate-npu --npu-insts-name=insts.txt $(<:%=../%)
+else
+	cd ${@D} && aiecc.py --aie-generate-cdo --no-compile-host --xclbin-name=${@F} \
+		--no-xchesscc --no-xbridge \
+				--aie-generate-npu --npu-insts-name=insts.txt $(<:%=../%)
+endif
 
-# Create build directories
-$(BUILD_DIR):
-	mkdir -p $(BUILD_DIR)
+build/insts.txt: build/final.xclbin
 
-$(KERNEL_BUILD_DIR): $(BUILD_DIR)
-	mkdir -p $(KERNEL_BUILD_DIR)
+${targetname}.exe: ${srcdir}/test.cpp
+	rm -rf _build
+	mkdir -p _build
+	cd _build && ${powershell} cmake ${srcdir} -DTARGET_NAME=${targetname} -B.
+	cd _build && ${powershell} cmake --build . --config Release
+ifeq "${powershell}" "powershell.exe"
+	cp _build/${targetname}.exe $@
+else
+	cp _build/${targetname} $@ 
+endif
 
-# Compile AIE kernels
-kernels: $(KERNEL_OBJ)
+run: ${targetname}.exe build/final.xclbin build/insts.txt 
+	${powershell} ./$< -x build/final.xclbin -i build/insts.txt -k MLIR_AIE
 
-$(KERNEL_OBJ): kernels/mv_ternary.cc | $(KERNEL_BUILD_DIR)
-	@echo "Compiling AIE kernel: mv_ternary.cc"
-	$(AIE_CC) $(AIE_CC_FLAGS) \
-		-DDIM_M=$(M_TILE) \
-		-DDIM_K=$(K_TILE) \
-		-I$(AIE_KERNELS_DIR) \
-		-o $@ $<
+run_py: build/final.xclbin build/insts.txt
+	${powershell} python3 ${srcdir}/test.py -x build/final.xclbin -i build/insts.txt -k MLIR_AIE
 
-# Generate MLIR design
-mlir: $(BUILD_DIR)/bitnet_mv.mlir
+trace: ${targetname}.exe build/final_trace.xclbin build/insts.txt 
+	${powershell} ./$< -x build/final_trace.xclbin -i build/insts.txt -k MLIR_AIE -t ${trace_size}
+	${srcdir}/../mlir-aie/utils/parse_trace.py --filename trace.txt --mlir build/aie_trace.mlir --colshift 1 > trace_bitnet.json
 
-$(BUILD_DIR)/bitnet_mv.mlir: bitnet_mv.py | $(BUILD_DIR)
-	@echo "Generating MLIR design for $(MODEL) layer $(LAYER)"
-	python3 $< \
-		--dev $(DEVICE) \
-		--model $(MODEL) \
-		--layer $(LAYER) \
-		--m-tile $(M_TILE) \
-		--k-tile $(K_TILE) \
-		--n-cores $(N_CORES) \
-		> $@
+clean_trace:
+	rm -rf tmpTrace trace.txt parse*json trace*json
 
-# Generate xclbin (requires full MLIR-AIE toolchain)
-xclbin: $(XCLBIN)
+clean: clean_trace
+	rm -rf build _build ${targetname}*.exe
 
-$(XCLBIN): $(BUILD_DIR)/bitnet_mv.mlir $(KERNEL_OBJ)
-	@echo "Generating xclbin package..."
-	@echo "NOTE: Full xclbin generation requires MLIR-AIE toolchain"
-	@echo "      This is a placeholder - actual build depends on your setup"
-	@if command -v aie2xclbin >/dev/null 2>&1; then \
-		aie2xclbin \
-			--aie-generate-cdo \
-			--aie-generate-npu \
-			--no-aie-generate-ctrlpkt \
-			--aie-generate-xclbin \
-			--xclbin-name=$@ \
-			$<; \
-	else \
-		echo "Warning: aie2xclbin not found, creating placeholder"; \
-		touch $@; \
-	fi
-
-# Test target
-test: $(XCLBIN)
-	@echo "Running basic NPU tests..."
-	@if [ -f $(XCLBIN) ] && [ -s $(XCLBIN) ]; then \
-		echo "xclbin file exists: $(XCLBIN)"; \
-		echo "Size: $$(ls -lh $(XCLBIN) | awk '{print $$5}')"; \
-	else \
-		echo "Warning: xclbin not generated (toolchain may be missing)"; \
-	fi
-
-# Clean build artifacts
-clean:
-	rm -rf $(BUILD_DIR)
-
-# Model-specific targets
-.PHONY: bitnet-3b bitnet-large llama3
+.PHONY: all clean clean_trace run run_py trace bitnet-3b bitnet-large llama3 help
 
 bitnet-3b:
 	$(MAKE) MODEL=bitnet_b1_58-3B
@@ -146,3 +117,30 @@ bitnet-large:
 
 llama3:
 	$(MAKE) MODEL=Llama3-8B-1.58-100B-tokens
+
+help:
+	@echo "BitNet AMD NPU Kernel Build System"
+	@echo ""
+	@echo "Usage: make [target] [options]"
+	@echo ""
+	@echo "Targets:"
+	@echo "  all          - Build xclbin and instructions (default)"
+	@echo "  run          - Build and run C++ test"
+	@echo "  run_py       - Build and run Python test"
+	@echo "  trace        - Build with tracing and run"
+	@echo "  clean        - Remove build artifacts"
+	@echo "  help         - Show this help"
+	@echo ""
+	@echo "Model shortcuts:"
+	@echo "  bitnet-3b    - Build for bitnet_b1_58-3B"
+	@echo "  bitnet-large - Build for bitnet_b1_58-large"
+	@echo "  llama3       - Build for Llama3-8B-1.58-100B-tokens"
+	@echo ""
+	@echo "Options:"
+	@echo "  device=npu|npu2   - Target device (default: npu)"
+	@echo "  MODEL=<name>      - Model configuration"
+	@echo "  LAYER=<n>         - Layer index (default: 0)"
+	@echo "  M_TILE=<n>        - M tile size (default: 32)"
+	@echo "  K_TILE=<n>        - K tile size (default: 32)"
+	@echo "  N_CORES=<n>       - Number of AIE cores (default: 1)"
+	@echo "  CHESS=true|false  - Use Chess compiler (default: true)"
