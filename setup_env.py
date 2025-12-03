@@ -68,6 +68,8 @@ COMPILER_EXTRA_ARGS = {
     "x86_64": ["-DBITNET_X86_TL2=ON"]
 }
 
+NPU_COMPILER_ARGS = ["-DBITNET_NPU=ON"]
+
 OS_EXTRA_ARGS = {
     "Windows":["-T", "ClangCL"],
 }
@@ -199,6 +201,17 @@ def gen_code():
         else:
             raise NotImplementedError()
 
+def setup_npu():
+    """Setup NPU kernel headers (skip codegen, use pre-built NPU header)."""
+    logging.info("Setting up NPU acceleration...")
+    # Copy NPU header to include directory
+    npu_header_src = "include/bitnet-lut-kernels-npu.h"
+    npu_header_dst = "include/bitnet-lut-kernels.h"
+    if os.path.exists(npu_header_src):
+        shutil.copyfile(npu_header_src, npu_header_dst)
+        logging.info(f"Copied NPU kernel header to {npu_header_dst}")
+    else:
+        logging.warning(f"NPU header {npu_header_src} not found, using existing header")
 
 def compile():
     # Check if cmake is installed
@@ -207,17 +220,38 @@ def compile():
         logging.error("Cmake is not available. Please install CMake and try again.")
         sys.exit(1)
     _, arch = system_info()
-    if arch not in COMPILER_EXTRA_ARGS.keys():
-        logging.error(f"Arch {arch} is not supported yet")
-        exit(0)
+    
+    # Build cmake arguments
+    cmake_args = ["cmake", "-B", "build"]
+    
+    # Add NPU or architecture-specific args
+    if args.use_npu:
+        logging.info("Building with AMD NPU acceleration support...")
+        cmake_args.extend(NPU_COMPILER_ARGS)
+    else:
+        if arch not in COMPILER_EXTRA_ARGS.keys():
+            logging.error(f"Arch {arch} is not supported yet")
+            exit(0)
+        cmake_args.extend(COMPILER_EXTRA_ARGS[arch])
+    
+    # Add OS-specific args
+    cmake_args.extend(OS_EXTRA_ARGS.get(platform.system(), []))
+    
+    # Add compiler specification
+    cmake_args.extend(["-DCMAKE_C_COMPILER=clang", "-DCMAKE_CXX_COMPILER=clang++"])
+    
     logging.info("Compiling the code using CMake.")
-    run_command(["cmake", "-B", "build", *COMPILER_EXTRA_ARGS[arch], *OS_EXTRA_ARGS.get(platform.system(), []), "-DCMAKE_C_COMPILER=clang", "-DCMAKE_CXX_COMPILER=clang++"], log_step="generate_build_files")
-    # run_command(["cmake", "--build", "build", "--target", "llama-cli", "--config", "Release"])
+    run_command(cmake_args, log_step="generate_build_files")
     run_command(["cmake", "--build", "build", "--config", "Release"], log_step="compile")
 
 def main():
     setup_gguf()
-    gen_code()
+    
+    # Setup NPU or generate code based on args
+    if args.use_npu:
+        setup_npu()
+    else: gen_code()  # Uncomment to enable codegen for non-NPU builds
+    
     compile()
     prepare_model()
     
@@ -230,6 +264,8 @@ def parse_args():
     parser.add_argument("--quant-type", "-q", type=str, help="Quantization type", choices=SUPPORTED_QUANT_TYPES[arch], default="i2_s")
     parser.add_argument("--quant-embd", action="store_true", help="Quantize the embeddings to f16")
     parser.add_argument("--use-pretuned", "-p", action="store_true", help="Use the pretuned kernel parameters")
+    parser.add_argument("--use-npu", action="store_true", help="Use AMD NPU acceleration (requires XRT)")
+    parser.add_argument("--xclbin", type=str, help="Path to NPU xclbin file", default="npu/bitnet_mv.xclbin")
     return parser.parse_args()
 
 def signal_handler(sig, frame):

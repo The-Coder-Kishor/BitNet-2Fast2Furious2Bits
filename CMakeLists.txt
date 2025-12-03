@@ -14,6 +14,7 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 # option list
 option(BITNET_ARM_TL1    "bitnet.cpp: use tl1 on arm platform"    OFF)
 option(BITNET_X86_TL2    "bitnet.cpp: use tl2 on x86 platform"    OFF)
+option(BITNET_NPU        "bitnet.cpp: use AMD NPU acceleration"   OFF)
 
 
 set(CMAKE_CXX_STANDARD_REQUIRED true)
@@ -30,6 +31,46 @@ if (GGML_BITNET_ARM_TL1)
 endif()
 if (GGML_BITNET_X86_TL2)
     add_compile_definitions(GGML_BITNET_X86_TL2)
+endif()
+# AMD NPU acceleration support
+if (BITNET_NPU)
+    add_compile_definitions(GGML_BITNET_NPU)
+    
+    # Find XRT (Xilinx Runtime)
+    # XRT is typically installed in /opt/xilinx/xrt or can be specified via XRT_ROOT
+    if (DEFINED ENV{XRT_ROOT})
+        set(XRT_ROOT $ENV{XRT_ROOT})
+    elseif (EXISTS "/opt/xilinx/xrt")
+        set(XRT_ROOT "/opt/xilinx/xrt")
+    endif()
+    
+    if (XRT_ROOT)
+        list(APPEND CMAKE_PREFIX_PATH "${XRT_ROOT}")
+        find_package(XRT QUIET)
+        
+        if (XRT_FOUND)
+            message(STATUS "Found XRT: ${XRT_ROOT}")
+            include_directories(${XRT_INCLUDE_DIRS})
+            link_directories(${XRT_LIBRARY_DIRS})
+            set(NPU_LIBRARIES xrt_coreutil)
+        else()
+            # Manual XRT setup if find_package fails
+            message(STATUS "XRT find_package failed, using manual configuration")
+            include_directories(${XRT_ROOT}/include)
+            link_directories(${XRT_ROOT}/lib)
+            set(NPU_LIBRARIES xrt_coreutil)
+        endif()
+    else()
+        message(WARNING "XRT_ROOT not found. Set XRT_ROOT environment variable or install XRT to /opt/xilinx/xrt")
+    endif()
+    
+    # Add NPU runtime sources
+    set(NPU_SOURCES
+        ${CMAKE_CURRENT_SOURCE_DIR}/npu/npu_runtime.cpp
+    )
+    
+    # NPU include directory
+    include_directories(${CMAKE_CURRENT_SOURCE_DIR}/npu)
 endif()
 
 if (CMAKE_C_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
